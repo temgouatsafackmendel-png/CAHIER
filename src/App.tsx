@@ -2,13 +2,16 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * Application principale Cahier — Prise et Organisation de Notes.
+ * Application principale Cahier — Prise et Organisation de Notes (v2.0).
  * Conception et Réalisation : Mendel Temgoua.
  *
- * Respecte strictement la séparation Présentation / API / Persistance SQLite FTS5 :
- * - Aucune donnée pré-remplie par le backend ni aucun détail technique serveur exposé dans l'éditeur.
+ * Nouveautés de la mise à jour v2.0 :
+ * - Sauvegarde automatique intelligente (Auto-Save) en arrière-plan lors de la frappe.
+ * -Barre d'outils d'insertion rapide et Modes d'affichage Éditer / Aperçu structuré / Côte à côte.
+ * - Modèles de notes rapides (Templates : Réunion, Projet, Liste de tâches, Journal).
+ * - Import JSON & Téléchargement direct d'une note en fichier Markdown (.md).
  * - Mode Focus sans distraction (masque la barre latérale et la liste des notes).
- * - Documentation visuelle complète intégrée avec captures et schémas d'architecture.
+ * - Documentation visuelle complète intégrée avec photos et signature auteur.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -16,26 +19,40 @@ import {
   AlertCircle,
   Archive,
   ArchiveRestore,
+  Bold,
   BookOpen,
   Check,
+  CheckSquare,
   Clock,
+  Code,
+  Columns,
+  Copy,
   Download,
+  Edit3,
+  Eye,
+  FileDown,
   FileText,
   FolderArchive,
   Hash,
+  Heading2,
+  Italic,
   Layers,
+  List,
   Maximize2,
   Minimize2,
   Moon,
   Pin,
   Plus,
   Search,
+  Sparkles,
   Sun,
   Trash2,
+  Upload,
   UserCheck,
   X,
 } from 'lucide-react';
 import {
+  CreateNoteInput,
   Note,
   NoteSortOption,
   NoteStatusFilter,
@@ -48,12 +65,72 @@ import {
 import { ApiClientError, notesApi } from './services/notesApi.ts';
 
 type WorkspaceView = 'notes' | 'documentation';
+type EditorLayoutMode = 'write' | 'split' | 'preview';
 
 const DOC_IMAGES = {
   workspace: '/src/assets/images/doc_workspace_overview_1794873783965.jpg',
   focusMode: '/src/assets/images/doc_focus_mode_editor_1794873783544.jpg',
   architecture: '/src/assets/images/doc_architecture_visual_1794873784327.jpg',
 };
+
+interface NoteTemplate {
+  id: string;
+  label: string;
+  title: string;
+  tags: string[];
+  content: string;
+}
+
+const NOTE_TEMPLATES: NoteTemplate[] = [
+  {
+    id: 'meeting',
+    label: 'Compte-rendu de réunion',
+    title: 'Réunion de synchronisation',
+    tags: ['réunion', 'équipe'],
+    content: `## Objectifs de la séance
+- Faire le point sur l'avancement hebdomadaire
+- Identifier les points de blocage
+
+## Décisions validées
+- [x] Validation du périmètre fonctionnel
+- [ ] Planification des prochaines livraisons
+
+## Actions à suivre
+1. Préparer la synthèse
+2. Partager le compte-rendu`,
+  },
+  {
+    id: 'project',
+    label: 'Fiche Projet',
+    title: 'Planification de projet',
+    tags: ['projet', 'stratégie'],
+    content: `## Vision & Objectif
+Décrire en une phrase l'objectif principal et la valeur attendue.
+
+## Étapes clés
+- [ ] Phase 1 : Cadrage et conception
+- [ ] Phase 2 : Réalisation et vérification
+- [ ] Phase 3 : Mise en production
+
+## Notes & Références
+> Conserver une trace claire de chaque décision structurante.`,
+  },
+  {
+    id: 'tasks',
+    label: 'Liste de tâches prioritaires',
+    title: 'Priorités de la semaine',
+    tags: ['tâches', 'productivité'],
+    content: `## Priorités hautes
+- [ ] Finaliser le livrable principal
+- [ ] Relire la documentation
+
+## En attente
+- [ ] Retour de validation
+
+## Terminé
+- [x] Initialisation de l'espace de travail`,
+  },
+];
 
 function formatExactDateTime(iso: string | null): string {
   if (!iso) return '—';
@@ -82,6 +159,150 @@ function formatShortDate(iso: string): string {
 function estimateReadingMinutes(wordCount: number): number {
   if (wordCount <= 0) return 0;
   return Math.max(1, Math.ceil(wordCount / 200));
+}
+
+/**
+ * Rendu d'aperçu Markdown léger, sécurisé (100 % composants React natifs, zéro dangerouslySetInnerHTML)
+ * avec cases à cocher interactives permettant de cocher/décocher une tâche directement depuis l'aperçu.
+ */
+function StructuredNotePreview({
+  content,
+  onToggleChecklistLine,
+}: {
+  content: string;
+  onToggleChecklistLine?: (lineIndex: number) => void;
+}) {
+  const lines = content.split('\n');
+
+  if (!content.trim()) {
+    return (
+      <p className="text-sm text-slate-400 dark:text-slate-600 italic">
+        Aucun contenu à prévisualiser...
+      </p>
+    );
+  }
+
+  const renderInlineFormatting = (text: string) => {
+    const parts = text.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g);
+    return parts.map((part, idx) => {
+      if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
+        return (
+          <code
+            key={idx}
+            className="font-mono text-xs px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200"
+          >
+            {part.slice(1, -1)}
+          </code>
+        );
+      }
+      if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
+        return (
+          <strong key={idx} className="font-semibold text-slate-900 dark:text-slate-100">
+            {part.slice(2, -2)}
+          </strong>
+        );
+      }
+      if (part.startsWith('*') && part.endsWith('*') && part.length > 2) {
+        return (
+          <em key={idx} className="italic">
+            {part.slice(1, -1)}
+          </em>
+        );
+      }
+      return <React.Fragment key={idx}>{part}</React.Fragment>;
+    });
+  };
+
+  return (
+    <div className="space-y-2.5 text-[15px] sm:text-base leading-[1.75] text-slate-800 dark:text-slate-200">
+      {lines.map((line, index) => {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          return <div key={index} className="h-2" />;
+        }
+
+        if (trimmed.startsWith('### ')) {
+          return (
+            <h4
+              key={index}
+              className="text-base font-bold text-slate-900 dark:text-slate-100 pt-2"
+            >
+              {renderInlineFormatting(trimmed.slice(4))}
+            </h4>
+          );
+        }
+
+        if (trimmed.startsWith('## ')) {
+          return (
+            <h3
+              key={index}
+              className="text-lg font-bold text-slate-900 dark:text-slate-100 pt-3 pb-1 border-b border-slate-100 dark:border-slate-900"
+            >
+              {renderInlineFormatting(trimmed.slice(3))}
+            </h3>
+          );
+        }
+
+        if (trimmed.startsWith('# ')) {
+          return (
+            <h2
+              key={index}
+              className="text-xl font-bold text-slate-900 dark:text-slate-100 pt-3 pb-1"
+            >
+              {renderInlineFormatting(trimmed.slice(2))}
+            </h2>
+          );
+        }
+
+        const taskMatch = trimmed.match(/^-\s*\[([ xX])\]\s+(.*)$/);
+        if (taskMatch) {
+          const isChecked = taskMatch[1].toLowerCase() === 'x';
+          const taskText = taskMatch[2];
+          return (
+            <div key={index} className="flex items-start gap-2.5 py-0.5">
+              <input
+                type="checkbox"
+                checked={isChecked}
+                onChange={() => onToggleChecklistLine?.(index)}
+                className="mt-1.5 w-4 h-4 rounded border-slate-300 dark:border-slate-700 text-slate-900 focus:ring-0 cursor-pointer"
+              />
+              <span
+                className={
+                  isChecked ? 'line-through text-slate-400 dark:text-slate-500' : undefined
+                }
+              >
+                {renderInlineFormatting(taskText)}
+              </span>
+            </div>
+          );
+        }
+
+        if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+          return (
+            <div key={index} className="flex items-start gap-2.5 pl-1">
+              <span aria-hidden="true" className="text-slate-400 select-none">
+                •
+              </span>
+              <span>{renderInlineFormatting(trimmed.slice(2))}</span>
+            </div>
+          );
+        }
+
+        if (trimmed.startsWith('> ')) {
+          return (
+            <blockquote
+              key={index}
+              className="px-4 py-2 bg-slate-50 dark:bg-slate-900/60 border border-slate-200/80 dark:border-slate-800/80 rounded-md italic text-slate-600 dark:text-slate-400 text-sm"
+            >
+              {renderInlineFormatting(trimmed.slice(2))}
+            </blockquote>
+          );
+        }
+
+        return <p key={index}>{renderInlineFormatting(line)}</p>;
+      })}
+    </div>
+  );
 }
 
 function ResilientDocImage({
@@ -142,7 +363,7 @@ export default function App() {
     }
   }, [darkMode]);
 
-  // Mode Focus de l'éditeur (masque la barre latérale et la liste des notes pour maximiser l'espace d'écriture)
+  // Mode Focus de l'éditeur (masque la barre latérale et la liste des notes)
   const [isFocusMode, setIsFocusMode] = useState<boolean>(() => {
     try {
       return localStorage.getItem('cahier_focus_mode') === 'true';
@@ -159,6 +380,10 @@ export default function App() {
     }
   }, [isFocusMode]);
 
+  // Sauvegarde automatique (Auto-Save) activée par défaut
+  const [autoSaveEnabled, setAutoSaveEnabled] = useState<boolean>(true);
+  const [editorLayout, setEditorLayout] = useState<EditorLayoutMode>('write');
+
   // États de navigation et de filtrage
   const [activeView, setActiveView] = useState<WorkspaceView>('notes');
   const [statusFilter, setStatusFilter] = useState<NoteStatusFilter>('active');
@@ -167,7 +392,7 @@ export default function App() {
   const [debouncedQuery, setDebouncedQuery] = useState<string>('');
   const [sortBy, setSortBy] = useState<NoteSortOption>('updated_desc');
 
-  // Données chargées exclusivement selon les actions de l'utilisateur
+  // Données chargées selon les actions de l'utilisateur
   const [notes, setNotes] = useState<Note[]>([]);
   const [stats, setStats] = useState<NotesStats>({
     total_count: 0,
@@ -198,6 +423,7 @@ export default function App() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const contentTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const importFileInputRef = useRef<HTMLInputElement>(null);
 
   // Debounce de la recherche plein texte (180ms)
   useEffect(() => {
@@ -295,15 +521,19 @@ export default function App() {
     setIsDirty(false);
   };
 
-  // Création d'une nouvelle note par l'utilisateur
-  const handleCreateNewNote = async () => {
+  // Création d'une nouvelle note (vierge ou à partir d'un modèle)
+  const handleCreateNewNote = async (template?: NoteTemplate) => {
     setErrorMessage(null);
     setIsSaving(true);
     try {
-      const defaultTags = selectedTag ? [selectedTag] : [];
+      const defaultTags = template
+        ? template.tags
+        : selectedTag
+          ? [selectedTag]
+          : [];
       const created = await notesApi.createNote({
-        title: 'Nouvelle note',
-        content: '',
+        title: template ? template.title : 'Nouvelle note',
+        content: template ? template.content : '',
         tags: defaultTags,
         is_pinned: false,
       });
@@ -313,7 +543,9 @@ export default function App() {
       }
       setActiveView('notes');
       await loadNotesData(created.id);
-      showTemporaryFeedback('Nouvelle note créée.');
+      showTemporaryFeedback(
+        template ? `Modèle « ${template.label} » créé.` : 'Nouvelle note créée.'
+      );
       window.setTimeout(() => {
         titleInputRef.current?.focus();
         titleInputRef.current?.select();
@@ -327,46 +559,82 @@ export default function App() {
     }
   };
 
-  // Sauvegarde des modifications de la note courante
-  const handleSaveNote = async () => {
-    if (!selectedNoteId) return;
-    const trimmedTitle = draftTitle.trim();
-    if (!trimmedTitle) {
-      setErrorMessage('Le titre de la note ne peut pas être vide.');
-      return;
-    }
-
+  // Duplication d'une note existante en un clic
+  const handleDuplicateNote = async () => {
+    if (!selectedNote) return;
     setIsSaving(true);
     setErrorMessage(null);
     try {
-      const updated = await notesApi.updateNote(selectedNoteId, {
-        title: trimmedTitle,
+      const duplicated = await notesApi.createNote({
+        title: `${draftTitle.trim() || selectedNote.title} (Copie)`,
         content: draftContent,
         tags: draftTags,
-        is_pinned: draftPinned,
+        is_pinned: false,
       });
-      setNotes((prev) => prev.map((n) => (n.id === updated.id ? updated : n)));
-      setDraftTitle(updated.title);
-      setDraftContent(updated.content);
-      setDraftTags(updated.tags);
-      setDraftPinned(updated.is_pinned);
-      setIsDirty(false);
-      await loadNotesData(updated.id);
-      showTemporaryFeedback('Note enregistrée.');
+      await loadNotesData(duplicated.id);
+      showTemporaryFeedback('Note dupliquée avec succès.');
     } catch (err) {
       const message =
-        err instanceof ApiClientError ? err.message : 'Erreur lors de la sauvegarde de la note.';
+        err instanceof ApiClientError ? err.message : 'Impossible de dupliquer la note.';
       setErrorMessage(message);
     } finally {
       setIsSaving(false);
     }
   };
 
-  // Raccourcis clavier globaux :
-  // - Ctrl/Cmd+K : focus dans la recherche (quitte le mode Focus si actif)
-  // - Ctrl/Cmd+S : sauvegarder la note active
-  // - Ctrl/Cmd+\ ou Ctrl/Cmd+Shift+F : basculer le mode Focus de l'éditeur
-  // - Échap : quitter le mode Focus
+  // Sauvegarde des modifications de la note courante
+  const handleSaveNote = useCallback(
+    async (silent = false) => {
+      if (!selectedNoteId) return;
+      const trimmedTitle = draftTitle.trim();
+      if (!trimmedTitle) {
+        if (!silent) {
+          setErrorMessage('Le titre de la note ne peut pas être vide.');
+        }
+        return;
+      }
+
+      setIsSaving(true);
+      if (!silent) setErrorMessage(null);
+      try {
+        const updated = await notesApi.updateNote(selectedNoteId, {
+          title: trimmedTitle,
+          content: draftContent,
+          tags: draftTags,
+          is_pinned: draftPinned,
+        });
+        setNotes((prev) => prev.map((n) => (n.id === updated.id ? updated : n)));
+        setIsDirty(false);
+        if (!silent) {
+          showTemporaryFeedback('Note enregistrée.');
+        }
+      } catch (err) {
+        if (!silent) {
+          const message =
+            err instanceof ApiClientError
+              ? err.message
+              : 'Erreur lors de la sauvegarde de la note.';
+          setErrorMessage(message);
+        }
+      } finally {
+        setIsSaving(false);
+      }
+    },
+    [selectedNoteId, draftTitle, draftContent, draftTags, draftPinned, showTemporaryFeedback]
+  );
+
+  // Sauvegarde automatique (Auto-Save) 1.2s après arrêt de la saisie
+  useEffect(() => {
+    if (!autoSaveEnabled || !isDirty || !selectedNoteId || !draftTitle.trim()) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void handleSaveNote(true);
+    }, 1200);
+    return () => window.clearTimeout(timer);
+  }, [autoSaveEnabled, isDirty, selectedNoteId, draftTitle, draftContent, draftTags, handleSaveNote]);
+
+  // Raccourcis clavier globaux
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
@@ -375,9 +643,9 @@ export default function App() {
         setIsFocusMode(false);
         window.setTimeout(() => searchInputRef.current?.focus(), 30);
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
-        if (activeView === 'notes' && selectedNoteId && isDirty) {
+        if (activeView === 'notes' && selectedNoteId) {
           e.preventDefault();
-          void handleSaveNote();
+          void handleSaveNote(false);
         }
       } else if (
         ((e.metaKey || e.ctrlKey) && e.key === '\\') ||
@@ -394,6 +662,50 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   });
+
+  // Insertion rapide de balises Markdown dans la zone de texte
+  const insertMarkdownSyntax = (prefix: string, suffix = '', defaultText = 'texte') => {
+    const textarea = contentTextareaRef.current;
+    if (!textarea) {
+      setDraftContent((prev) => `${prev}${prev ? '\n' : ''}${prefix}${defaultText}${suffix}`);
+      setIsDirty(true);
+      return;
+    }
+
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const selected = draftContent.slice(start, end) || defaultText;
+    const replacement = `${prefix}${selected}${suffix}`;
+    const nextContent =
+      draftContent.slice(0, start) + replacement + draftContent.slice(end);
+
+    setDraftContent(nextContent);
+    setIsDirty(true);
+
+    window.setTimeout(() => {
+      textarea.focus();
+      textarea.setSelectionRange(
+        start + prefix.length,
+        start + prefix.length + selected.length
+      );
+    }, 20);
+  };
+
+  // Cocher / décocher une case directement depuis l'aperçu structuré
+  const handleToggleChecklistLine = (lineIndex: number) => {
+    const lines = draftContent.split('\n');
+    const target = lines[lineIndex];
+    if (!target) return;
+
+    if (/^(\s*-\s*)\[ \](.*)$/.test(target)) {
+      lines[lineIndex] = target.replace(/^(\s*-\s*)\[ \](.*)$/, '$1[x]$2');
+    } else if (/^(\s*-\s*)\[[xX]\](.*)$/.test(target)) {
+      lines[lineIndex] = target.replace(/^(\s*-\s*)\[[xX]\](.*)$/, '$1[ ]$2');
+    }
+
+    setDraftContent(lines.join('\n'));
+    setIsDirty(true);
+  };
 
   // Bascule d'épinglage immédiate
   const handleTogglePin = async () => {
@@ -487,6 +799,30 @@ export default function App() {
     setIsDirty(true);
   };
 
+  // Téléchargement de la note active en fichier Markdown (.md)
+  const handleDownloadMarkdown = () => {
+    if (!selectedNote) return;
+    const title = draftTitle.trim() || selectedNote.title;
+    const tagsHeader = draftTags.length > 0 ? `Tags: ${draftTags.map((t) => `#${t}`).join(' ')}\n\n` : '';
+    const mdContent = `# ${title}\n\n${tagsHeader}${draftContent}\n`;
+    const blob = new Blob([mdContent], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const safeSlug =
+      title
+        .toLowerCase()
+        .replace(/[^a-z0-9àâäéèêëîïôöùûüÿç-]+/gi, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 48) || 'note';
+    a.href = url;
+    a.download = `${safeSlug}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showTemporaryFeedback('Note téléchargée au format Markdown (.md).');
+  };
+
   // Export JSON de toutes les notes de l'utilisateur
   const handleExportJson = async () => {
     try {
@@ -507,6 +843,52 @@ export default function App() {
       const message =
         err instanceof ApiClientError ? err.message : "Impossible d'exporter les notes.";
       setErrorMessage(message);
+    }
+  };
+
+  // Import d'un fichier JSON de notes
+  const handleImportJsonFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setErrorMessage(null);
+    setIsSaving(true);
+    try {
+      const rawText = await file.text();
+      const parsed = JSON.parse(rawText) as { notes?: CreateNoteInput[] } | CreateNoteInput[];
+      const items: CreateNoteInput[] = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed.notes)
+          ? parsed.notes
+          : [];
+
+      if (items.length === 0) {
+        throw new Error('Aucune note valide trouvée dans le fichier sélectionné.');
+      }
+
+      let importedCount = 0;
+      let lastId: string | null = null;
+      for (const item of items.slice(0, 50)) {
+        if (item && typeof item.title === 'string' && item.title.trim()) {
+          const created = await notesApi.createNote({
+            title: item.title.trim().slice(0, VALIDATION_LIMITS.TITLE_MAX_LENGTH),
+            content: typeof item.content === 'string' ? item.content : '',
+            tags: Array.isArray(item.tags) ? item.tags : [],
+            is_pinned: Boolean(item.is_pinned),
+          });
+          lastId = created.id;
+          importedCount += 1;
+        }
+      }
+
+      await loadNotesData(lastId);
+      showTemporaryFeedback(`${importedCount} note(s) importée(s) avec succès.`);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Format de fichier d'import invalide.";
+      setErrorMessage(message);
+    } finally {
+      setIsSaving(false);
+      e.target.value = '';
     }
   };
 
@@ -654,7 +1036,7 @@ export default function App() {
 
       {/* Espace de travail principal */}
       <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
-        {/* Colonne 1 : Barre latérale de filtres et tags (Masquée en mode Focus) */}
+        {/* Colonne 1 : Barre latérale de filtres, modèles et tags (Masquée en mode Focus) */}
         {!isFocusMode && (
           <aside
             aria-label="Filtres et organisation"
@@ -747,6 +1129,27 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Modèles rapides (Templates v2.0) */}
+              <div>
+                <div className="px-2.5 text-xs font-medium text-slate-400 dark:text-slate-500 mb-2">
+                  Modèles rapides
+                </div>
+                <div className="space-y-0.5">
+                  {NOTE_TEMPLATES.map((tpl) => (
+                    <button
+                      key={tpl.id}
+                      type="button"
+                      onClick={() => void handleCreateNewNote(tpl)}
+                      disabled={isSaving}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800/50 hover:text-slate-900 dark:hover:text-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      <Sparkles className="w-3 h-3 opacity-60 shrink-0" />
+                      <span className="truncate">{tpl.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               {/* Filtrage interactif par Tags */}
               <div>
                 <div className="flex items-center justify-between px-2.5 mb-2">
@@ -769,7 +1172,7 @@ export default function App() {
                     Vos tags apparaîtront ici dès que vous en ajouterez à vos notes.
                   </p>
                 ) : (
-                  <div className="space-y-0.5 max-h-64 overflow-y-auto pr-1">
+                  <div className="space-y-0.5 max-h-48 overflow-y-auto pr-1">
                     {tagsStats.map((tag) => {
                       const isSelected = selectedTag === tag.name;
                       return (
@@ -801,26 +1204,44 @@ export default function App() {
               </div>
             </div>
 
-            {/* Pied de barre latérale : Signature auteur & Utilitaires */}
+            {/* Pied de barre latérale : Signature auteur & Utilitaires Import/Export */}
             <div className="pt-4 border-t border-slate-200/80 dark:border-slate-800/80 space-y-3">
               <div className="px-1 text-xs text-slate-500 dark:text-slate-400 space-y-0.5">
                 <div className="font-medium text-slate-700 dark:text-slate-300">
                   Réalisé par Mendel Temgoua
                 </div>
                 <div className="font-mono tabular-nums text-[11px] text-slate-400 dark:text-slate-500">
-                  {stats.total_words} mots rédigés
+                  {stats.total_words} mots rédigés · v2.0
                 </div>
               </div>
+
+              <input
+                ref={importFileInputRef}
+                type="file"
+                accept="application/json,.json"
+                onChange={(e) => void handleImportJsonFile(e)}
+                className="hidden"
+              />
 
               <div className="flex items-center gap-1.5">
                 <button
                   type="button"
                   onClick={() => void handleExportJson()}
-                  className="flex-1 inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-100 bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 text-xs font-medium text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-100 bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   title="Exporter vos notes en JSON"
                 >
                   <Download className="w-3.5 h-3.5" />
                   <span>Exporter</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => importFileInputRef.current?.click()}
+                  className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 text-xs font-medium text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-100 bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  title="Importer un fichier JSON de notes"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>Importer</span>
                 </button>
 
                 <button
@@ -850,46 +1271,45 @@ export default function App() {
                     Mendel Temgoua
                   </strong>
                   <span aria-hidden="true">·</span>
-                  <span className="font-mono tabular-nums">Version 1.0</span>
+                  <span className="font-mono tabular-nums">Mise à jour v2.0</span>
                 </div>
 
                 <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 dark:text-slate-100 text-balance">
-                  Documentation Officielle — Cahier (Application de Prise et d’Organisation de Notes)
+                  Documentation Officielle — Cahier v2.0 (Application de Prise et d’Organisation de Notes)
                 </h1>
 
                 <p className="text-sm sm:text-base text-slate-600 dark:text-slate-400 leading-relaxed max-w-3xl">
-                  Cahier est une application complète de prise de notes conçue pour offrir un espace d’écriture épuré, une organisation par tags normalisés, un archivage structuré et une recherche plein texte instantanée, sans polluer l’interface avec des données techniques du serveur.
+                  Cahier v2.0 enrichit l’expérience d’écriture avec la sauvegarde automatique en temps réel, l’aperçu structuré avec listes de tâches interactives, les modèles rapides de documents, l’export Markdown individuel et l’import/export JSON complet.
                 </p>
               </header>
 
               {/* Section 1 : Aperçu visuel de l'espace de travail */}
               <section className="space-y-4">
                 <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
-                  01. Présentation de l’Interface & Ergonomie Épurée
+                  01. Présentation de l’Interface & Nouveautés v2.0
                 </h2>
                 <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
-                  L’interface est structurée en trois zones complémentaires : la navigation latérale par vues et par tags à gauche, la liste de recherche instantanée au centre et la feuille d’écriture éditoriale à droite. L’espace démarre vierge de toute donnée pré-injectée afin que seules vos propres notes y figurent.
+                  L’interface sépare clairement la navigation latérale (vues, modèles rapides, tags), la liste de recherche instantanée et l’éditeur. Aucune donnée artificielle du serveur n’est injectée dans votre espace.
                 </p>
                 <ResilientDocImage
                   src={DOC_IMAGES.workspace}
                   alt="Aperçu de l'espace de travail Cahier à 3 colonnes"
-                  caption="Figure 1 — Vue d'ensemble de l'espace de travail Cahier (Navigation par tags, Liste de notes et Éditeur éditorial) — Réalisé par Mendel Temgoua."
+                  caption="Figure 1 — Vue d'ensemble de l'espace de travail Cahier (Navigation par tags, Modèles rapides, Liste et Éditeur) — Réalisé par Mendel Temgoua."
                 />
               </section>
 
               {/* Section 2 : Mode Focus sans distraction */}
               <section className="space-y-4">
                 <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
-                  02. Mode Focus — Écriture Sans Distraction
+                  02. Mode Focus, Auto-Save & Aperçu Côte à Côte
                 </h2>
                 <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
-                  Pour maximiser la concentration lors de la rédaction de longs documents, le bouton{" "}
-                  <strong>« Mode Focus »</strong> (ou le raccourci clavier <code className="font-mono text-xs px-1.5 py-0.5 bg-slate-100 dark:bg-slate-900 rounded">Ctrl + \</code>) masque instantanément la barre latérale et la colonne de liste des notes. L’éditeur occupe alors toute la largeur disponible avec une colonne de lecture centrée optimale.
+                  Le bouton <strong>« Mode Focus »</strong> (<code className="font-mono text-xs px-1.5 py-0.5 bg-slate-100 dark:bg-slate-900 rounded">Ctrl + \</code>) masque la barre latérale et la liste des notes. La mise à jour v2.0 ajoute trois modes de lecture/écriture (<strong>Écrire</strong>, <strong>Côte à côte</strong>, <strong>Aperçu</strong>) ainsi que la sauvegarde automatique intelligente pendant la frappe.
                 </p>
                 <ResilientDocImage
                   src={DOC_IMAGES.focusMode}
                   alt="Mode Focus de l'éditeur Cahier"
-                  caption="Figure 2 — Le Mode Focus masque tous les panneaux latéraux pour offrir une feuille d'écriture plein écran sans distraction — Réalisé par Mendel Temgoua."
+                  caption="Figure 2 — Le Mode Focus combiné à la sauvegarde automatique offre un environnement d'écriture plein écran sans distraction — Réalisé par Mendel Temgoua."
                 />
               </section>
 
@@ -899,7 +1319,7 @@ export default function App() {
                   03. Architecture Technique & Isolation des Données
                 </h2>
                 <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
-                  L’architecture respecte une séparation stricte des responsabilités : le Front-End ne reçoit ni n’affiche d’identifiants internes, de journaux système ou de fausses données issues du Back-End. Le serveur valide les entrées, assure la persistance locale et indexe le texte pour la recherche plein texte.
+                  L’architecture garantit que le Front-End reste pur et dédié à l’utilisateur, tandis que le Back-End assure la validation des schémas, la sauvegarde persistante et l’indexation plein texte FTS5.
                 </p>
                 <ResilientDocImage
                   src={DOC_IMAGES.architecture}
@@ -910,26 +1330,26 @@ export default function App() {
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
                   <div className="p-4 border border-slate-200/80 dark:border-slate-800/80 rounded-lg space-y-1.5">
                     <h3 className="text-xs font-semibold text-slate-900 dark:text-slate-100">
-                      Création, Édition & Tags
+                      Auto-Save & Modèles
                     </h3>
                     <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-                      Saisie fluide avec normalisation automatique des tags (<code className="font-mono">#projet</code>), épinglage en tête de liste et horodatage précis.
+                      Sauvegarde automatique après chaque saisie et création en un clic à partir de modèles (Réunion, Projet, Tâches).
                     </p>
                   </div>
                   <div className="p-4 border border-slate-200/80 dark:border-slate-800/80 rounded-lg space-y-1.5">
                     <h3 className="text-xs font-semibold text-slate-900 dark:text-slate-100">
-                      Recherche Plein Texte
+                      Aperçu & Checklists
                     </h3>
                     <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-                      Recherche instantanée (<code className="font-mono">Ctrl + K</code>) sur le titre, le contenu et les tags, insensible à la casse et aux accents.
+                      Barre d’outils de formatage rapide et mode Aperçu avec cases à cocher interactives.
                     </p>
                   </div>
                   <div className="p-4 border border-slate-200/80 dark:border-slate-800/80 rounded-lg space-y-1.5">
                     <h3 className="text-xs font-semibold text-slate-900 dark:text-slate-100">
-                      Archivage & Export
+                      Export .MD & Import JSON
                     </h3>
                     <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-                      Archivage et restauration en un clic pour garder l’espace actif ordonné, avec export JSON portable à tout moment.
+                      Téléchargement individuel des notes en Markdown (<code className="font-mono">.md</code>) et import/export global en JSON.
                     </p>
                   </div>
                 </div>
@@ -938,7 +1358,7 @@ export default function App() {
               {/* Pied de documentation avec signature de l'auteur */}
               <footer className="pt-6 border-t border-slate-200/80 dark:border-slate-800/80 flex flex-wrap items-center justify-between gap-4 text-xs text-slate-500 dark:text-slate-400">
                 <div>
-                  Auteur & Architecte du projet :{" "}
+                  Auteur & Architecte du projet :{' '}
                   <strong className="font-semibold text-slate-900 dark:text-slate-100">
                     Mendel Temgoua
                   </strong>
@@ -1039,7 +1459,7 @@ export default function App() {
                           ? 'Aucune note ne correspond à votre recherche ou au tag sélectionné.'
                           : statusFilter === 'archived'
                             ? 'Les notes que vous archivez apparaîtront dans cet espace.'
-                            : 'Créez votre première note personnelle pour commencer.'}
+                            : 'Créez une note vierge ou utilisez un modèle rapide dans la barre latérale.'}
                       </p>
                       {searchQuery || selectedTag ? (
                         <button
@@ -1133,7 +1553,7 @@ export default function App() {
               </section>
             )}
 
-            {/* Colonne 3 : Éditeur professionnel épuré avec Mode Focus */}
+            {/* Colonne 3 : Éditeur professionnel v2.0 avec Mode Focus, Barre de formatage et Aperçu */}
             <main
               aria-label="Éditeur de note"
               className="flex-1 bg-white dark:bg-slate-950 flex flex-col overflow-y-auto"
@@ -1142,12 +1562,12 @@ export default function App() {
                 <div className="flex-1 flex flex-col items-center justify-center p-12 text-center">
                   <FileText className="w-7 h-7 text-slate-300 dark:text-slate-700 mb-3" />
                   <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-200">
-                    Prêt à rédiger
+                    Prêt à rédiger (Mise à jour v2.0)
                   </h2>
-                  <p className="text-xs text-slate-500 dark:text-slate-400 max-w-sm mt-1 mb-4">
-                    Créez une nouvelle note ou consultez la documentation complète du projet.
+                  <p className="text-xs text-slate-500 dark:text-slate-400 max-w-md mt-1 mb-5">
+                    Créez une note vierge, démarrez à partir d’un modèle structuré ou consultez la documentation complète.
                   </p>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center justify-center gap-2">
                     {isFocusMode && (
                       <button
                         type="button"
@@ -1164,24 +1584,27 @@ export default function App() {
                       className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-slate-900 dark:bg-slate-100 dark:text-slate-900 rounded-md hover:opacity-90 transition-opacity whitespace-nowrap shrink-0 cursor-pointer"
                     >
                       <Plus className="w-3.5 h-3.5" />
-                      <span>Nouvelle note</span>
+                      <span>Nouvelle note vierge</span>
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => setActiveView('documentation')}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-800 rounded-md hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                    >
-                      <BookOpen className="w-3.5 h-3.5" />
-                      <span>Documentation</span>
-                    </button>
+                    {NOTE_TEMPLATES.map((tpl) => (
+                      <button
+                        key={tpl.id}
+                        type="button"
+                        onClick={() => void handleCreateNewNote(tpl)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        <Sparkles className="w-3.5 h-3.5 opacity-70" />
+                        <span>{tpl.label}</span>
+                      </button>
+                    ))}
                   </div>
                 </div>
               ) : (
                 <div className="flex-1 flex flex-col w-full">
-                  {/* Barre d'outils supérieure de l'éditeur (fine, alignée et non encombrée) */}
+                  {/* Barre d'outils supérieure de l'éditeur */}
                   <div className="px-6 lg:px-10 py-2.5 border-b border-slate-200/70 dark:border-slate-800/70 flex flex-wrap items-center justify-between gap-4 shrink-0">
-                    {/* Gauche : Bouton Mode Focus + Horodatages discrets */}
-                    <div className="flex flex-wrap items-center gap-3">
+                    {/* Gauche : Bouton Mode Focus + Sélecteur Écrire / Côte à côte / Aperçu + Horodatage */}
+                    <div className="flex flex-wrap items-center gap-2.5">
                       <button
                         type="button"
                         onClick={toggleFocusMode}
@@ -1200,7 +1623,7 @@ export default function App() {
                         {isFocusMode ? (
                           <>
                             <Minimize2 className="w-3.5 h-3.5" />
-                            <span>Quitter le mode Focus</span>
+                            <span>Quitter Focus</span>
                           </>
                         ) : (
                           <>
@@ -1210,29 +1633,59 @@ export default function App() {
                         )}
                       </button>
 
-                      <div className="hidden sm:flex items-center gap-2 text-xs text-slate-400 dark:text-slate-500 font-mono tabular-nums">
+                      {/* Sélecteur segmenté de mode d'édition */}
+                      <div className="inline-flex items-center p-0.5 bg-slate-100 dark:bg-slate-900 rounded-md border border-slate-200/80 dark:border-slate-800">
+                        <button
+                          type="button"
+                          onClick={() => setEditorLayout('write')}
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                            editorLayout === 'write'
+                              ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-xs'
+                              : 'text-slate-500 hover:text-slate-900 dark:hover:text-slate-200'
+                          }`}
+                        >
+                          <Edit3 className="w-3 h-3" />
+                          <span>Écrire</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setEditorLayout('split')}
+                          className={`hidden sm:inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                            editorLayout === 'split'
+                              ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-xs'
+                              : 'text-slate-500 hover:text-slate-900 dark:hover:text-slate-200'
+                          }`}
+                        >
+                          <Columns className="w-3 h-3" />
+                          <span>Côte à côte</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setEditorLayout('preview')}
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                            editorLayout === 'preview'
+                              ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-xs'
+                              : 'text-slate-500 hover:text-slate-900 dark:hover:text-slate-200'
+                          }`}
+                        >
+                          <Eye className="w-3 h-3" />
+                          <span>Aperçu</span>
+                        </button>
+                      </div>
+
+                      <div className="hidden xl:flex items-center gap-2 text-xs text-slate-400 dark:text-slate-500 font-mono tabular-nums">
                         <Clock className="w-3 h-3 shrink-0" />
                         <span>Modifiée le {formatExactDateTime(selectedNote.updated_at)}</span>
-                        <span aria-hidden="true">·</span>
-                        <span>Créée le {formatShortDate(selectedNote.created_at)}</span>
-                        {selectedNote.is_archived && selectedNote.archived_at && (
-                          <>
-                            <span aria-hidden="true">·</span>
-                            <span className="text-amber-700 dark:text-amber-400">
-                              Archivée le {formatShortDate(selectedNote.archived_at)}
-                            </span>
-                          </>
-                        )}
                       </div>
                     </div>
 
-                    {/* Droite : Actions d'édition et de cycle de vie de la note */}
-                    <div className="flex items-center gap-1.5 shrink-0">
+                    {/* Droite : Actions sur la note (Épingler, Dupliquer, Export .md, Archiver, Supprimer, Enregistrer) */}
+                    <div className="flex items-center gap-1 shrink-0">
                       <button
                         type="button"
                         onClick={() => void handleTogglePin()}
                         disabled={isSaving}
-                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        className={`inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                           draftPinned
                             ? 'bg-slate-100 dark:bg-slate-800 border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100'
                             : 'border-transparent text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-900'
@@ -1240,24 +1693,45 @@ export default function App() {
                         title={draftPinned ? 'Désépingler la note' : 'Épingler en haut de liste'}
                       >
                         <Pin className="w-3.5 h-3.5" />
-                        <span>{draftPinned ? 'Épinglée' : 'Épingler'}</span>
+                        <span className="hidden sm:inline">{draftPinned ? 'Épinglée' : 'Épingler'}</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => void handleDuplicateNote()}
+                        disabled={isSaving}
+                        className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-900 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                        title="Dupliquer cette note"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                        <span className="hidden md:inline">Dupliquer</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleDownloadMarkdown}
+                        className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-900 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                        title="Télécharger la note au format Markdown (.md)"
+                      >
+                        <FileDown className="w-3.5 h-3.5" />
+                        <span className="hidden md:inline">.md</span>
                       </button>
 
                       <button
                         type="button"
                         onClick={() => void handleToggleArchive(selectedNote)}
                         disabled={isSaving}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-900 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                        className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-900 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                       >
                         {selectedNote.is_archived ? (
                           <>
                             <ArchiveRestore className="w-3.5 h-3.5" />
-                            <span>Restaurer</span>
+                            <span className="hidden sm:inline">Restaurer</span>
                           </>
                         ) : (
                           <>
                             <Archive className="w-3.5 h-3.5" />
-                            <span>Archiver</span>
+                            <span className="hidden sm:inline">Archiver</span>
                           </>
                         )}
                       </button>
@@ -1288,10 +1762,11 @@ export default function App() {
                           type="button"
                           onClick={() => setConfirmDeleteId(selectedNote.id)}
                           disabled={isSaving}
-                          className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-slate-500 hover:text-red-600 dark:text-slate-400 dark:hover:text-red-400 hover:bg-red-50/60 dark:hover:bg-red-950/30 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                          className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-slate-500 hover:text-red-600 dark:text-slate-400 dark:hover:text-red-400 hover:bg-red-50/60 dark:hover:bg-red-950/30 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                          title="Supprimer la note"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
-                          <span>Supprimer</span>
+                          <span className="hidden sm:inline">Supprimer</span>
                         </button>
                       )}
 
@@ -1299,9 +1774,9 @@ export default function App() {
 
                       <button
                         type="button"
-                        onClick={() => void handleSaveNote()}
+                        onClick={() => void handleSaveNote(false)}
                         disabled={isSaving || !isDirty}
-                        className={`inline-flex items-center gap-1.5 px-3.5 py-1 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        className={`inline-flex items-center gap-1.5 px-3 py-1 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                           isDirty
                             ? 'bg-slate-900 text-white hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200'
                             : 'bg-slate-100 text-slate-400 dark:bg-slate-900 dark:text-slate-600 cursor-not-allowed'
@@ -1313,10 +1788,14 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Feuille d'écriture centrée : largeur optimale (max-w-3xl) pour le confort de lecture */}
+                  {/* Feuille d'écriture centrée */}
                   <div
                     className={`flex-1 flex flex-col w-full mx-auto px-6 sm:px-10 ${
-                      isFocusMode ? 'max-w-3xl py-10 sm:py-12' : 'max-w-3xl py-6 sm:py-8'
+                      editorLayout === 'split'
+                        ? 'max-w-6xl py-6 sm:py-8'
+                        : isFocusMode
+                          ? 'max-w-3xl py-10 sm:py-12'
+                          : 'max-w-3xl py-6 sm:py-8'
                     }`}
                   >
                     {/* Champ Titre éditorial */}
@@ -1399,26 +1878,122 @@ export default function App() {
                       </form>
                     </div>
 
-                    {/* Zone de rédaction principale à grand confort visuel */}
-                    <div className="flex-1 flex flex-col pt-6">
-                      <label htmlFor="note-content-textarea" className="sr-only">
-                        Contenu de la note
-                      </label>
-                      <textarea
-                        id="note-content-textarea"
-                        ref={contentTextareaRef}
-                        value={draftContent}
-                        maxLength={VALIDATION_LIMITS.CONTENT_MAX_LENGTH}
-                        onChange={(e) => {
-                          setDraftContent(e.target.value);
-                          setIsDirty(true);
-                        }}
-                        placeholder="Commencez à rédiger votre note..."
-                        className="flex-1 w-full min-h-[420px] resize-none bg-transparent border-0 text-[15px] sm:text-base leading-[1.75] text-slate-800 dark:text-slate-200 placeholder:text-slate-300 dark:placeholder:text-slate-700 focus:outline-none"
-                      />
+                    {/* Barre d'insertion rapide Markdown (affichée en mode Écrire ou Côte à côte) */}
+                    {editorLayout !== 'preview' && (
+                      <div className="flex flex-wrap items-center justify-between gap-2 py-2 border-b border-slate-100 dark:border-slate-900 text-xs text-slate-500">
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => insertMarkdownSyntax('## ', '', 'Sous-titre')}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded hover:bg-slate-100 dark:hover:bg-slate-900 hover:text-slate-900 dark:hover:text-slate-100 transition-colors cursor-pointer"
+                            title="Insérer un sous-titre"
+                          >
+                            <Heading2 className="w-3.5 h-3.5" />
+                            <span>Titre</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => insertMarkdownSyntax('**', '**', 'texte en gras')}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded hover:bg-slate-100 dark:hover:bg-slate-900 hover:text-slate-900 dark:hover:text-slate-100 transition-colors cursor-pointer"
+                            title="Gras"
+                          >
+                            <Bold className="w-3.5 h-3.5" />
+                            <span>Gras</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => insertMarkdownSyntax('*', '*', 'italique')}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded hover:bg-slate-100 dark:hover:bg-slate-900 hover:text-slate-900 dark:hover:text-slate-100 transition-colors cursor-pointer"
+                            title="Italique"
+                          >
+                            <Italic className="w-3.5 h-3.5" />
+                            <span>Italique</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => insertMarkdownSyntax('\n- [ ] ', '', 'Nouvelle tâche')}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded hover:bg-slate-100 dark:hover:bg-slate-900 hover:text-slate-900 dark:hover:text-slate-100 transition-colors cursor-pointer"
+                            title="Insérer une case à cocher"
+                          >
+                            <CheckSquare className="w-3.5 h-3.5" />
+                            <span>Tâche</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => insertMarkdownSyntax('\n- ', '', 'Élément de liste')}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded hover:bg-slate-100 dark:hover:bg-slate-900 hover:text-slate-900 dark:hover:text-slate-100 transition-colors cursor-pointer"
+                            title="Liste à puces"
+                          >
+                            <List className="w-3.5 h-3.5" />
+                            <span>Liste</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => insertMarkdownSyntax('`', '`', 'code')}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded hover:bg-slate-100 dark:hover:bg-slate-900 hover:text-slate-900 dark:hover:text-slate-100 transition-colors cursor-pointer"
+                            title="Code en ligne"
+                          >
+                            <Code className="w-3.5 h-3.5" />
+                            <span>Code</span>
+                          </button>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => setAutoSaveEnabled((prev) => !prev)}
+                          className="text-[11px] text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                          title="Activer ou désactiver la sauvegarde automatique pendant la frappe"
+                        >
+                          Auto-Save : {autoSaveEnabled ? 'Activé' : 'Manuel'}
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Zone principale : Écrire / Côte à côte / Aperçu */}
+                    <div
+                      className={`flex-1 pt-6 ${
+                        editorLayout === 'split'
+                          ? 'grid grid-cols-1 lg:grid-cols-2 gap-8 items-stretch'
+                          : 'flex flex-col'
+                      }`}
+                    >
+                      {(editorLayout === 'write' || editorLayout === 'split') && (
+                        <div className="flex-1 flex flex-col">
+                          <label htmlFor="note-content-textarea" className="sr-only">
+                            Contenu de la note
+                          </label>
+                          <textarea
+                            id="note-content-textarea"
+                            ref={contentTextareaRef}
+                            value={draftContent}
+                            maxLength={VALIDATION_LIMITS.CONTENT_MAX_LENGTH}
+                            onChange={(e) => {
+                              setDraftContent(e.target.value);
+                              setIsDirty(true);
+                            }}
+                            placeholder="Commencez à rédiger votre note (Markdown supporté : ## Titres, **gras**, - [ ] tâches)..."
+                            className="flex-1 w-full min-h-[420px] resize-none bg-transparent border-0 text-[15px] sm:text-base leading-[1.75] text-slate-800 dark:text-slate-200 placeholder:text-slate-300 dark:placeholder:text-slate-700 focus:outline-none"
+                          />
+                        </div>
+                      )}
+
+                      {(editorLayout === 'preview' || editorLayout === 'split') && (
+                        <div
+                          className={`flex-1 min-h-[420px] ${
+                            editorLayout === 'split'
+                              ? 'lg:border-l lg:border-slate-200/80 dark:lg:border-slate-800/80 lg:pl-8'
+                              : ''
+                          }`}
+                        >
+                          <StructuredNotePreview
+                            content={draftContent}
+                            onToggleChecklistLine={handleToggleChecklistLine}
+                          />
+                        </div>
+                      )}
                     </div>
 
-                    {/* Pied d'éditeur sobre (sans exposition de métadonnées techniques backend) */}
+                    {/* Pied d'éditeur sobre */}
                     <div className="pt-4 mt-6 border-t border-slate-100 dark:border-slate-900 flex flex-wrap items-center justify-between gap-4 text-xs text-slate-400 dark:text-slate-500 font-mono tabular-nums">
                       <div className="flex flex-wrap items-center gap-2">
                         <span>{liveMetrics.word_count} mots</span>
@@ -1436,13 +2011,17 @@ export default function App() {
                         )}
                       </div>
                       <div>
-                        {isDirty ? (
+                        {isSaving ? (
+                          <span className="text-slate-500 dark:text-slate-400 font-sans">
+                            Sauvegarde automatique...
+                          </span>
+                        ) : isDirty ? (
                           <span className="text-amber-700 dark:text-amber-400 font-sans font-medium">
-                            Modifications non enregistrées · Ctrl+S
+                            Modifications en attente · Ctrl+S
                           </span>
                         ) : (
                           <span className="text-slate-400 dark:text-slate-500 font-sans">
-                            Enregistré
+                            Enregistré · Réalisé par Mendel Temgoua
                           </span>
                         )}
                       </div>
