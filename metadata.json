@@ -1,0 +1,6 @@
+{
+  "name": "Cahier — Prise et Organisation de Notes",
+  "description": "Application professionnelle de prise, d'organisation et de recherche plein texte de notes avec sauvegarde persistante SQLite, gestion des tags, archivage et journal d'audit.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,23 @@
+services:
+  cahier-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cahier-notes
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - SQLITE_DB_PATH=/app/data/notes.sqlite
+      - RATE_LIMIT_MAX_REQUESTS=180
+    volumes:
+      - cahier_sqlite_data:/app/data
+    read_only: false
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  cahier_sqlite_data:
+    driver: local
